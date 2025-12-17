@@ -1607,7 +1607,7 @@ if __name__ == "__main__":
     main()
 
 st.header("Table Assessments - Team View")
-st.markdown('<p class="sub-header">kats Baseball Assessment Table by Player</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header"> Kats Baseball Assessment Table by Player</p>', unsafe_allow_html=True)
 excel_file_path = os.path.join("data", "KatsBaseballTableAssessment.xlsx")
 
 try:
@@ -1623,7 +1623,8 @@ try:
     
     # Clean up the dataframe - remove any completely empty rows
     display_df = display_df.dropna(how='all')
-    
+    numeric_cols = display_df.select_dtypes(include=[np.number]).columns
+    display_df[numeric_cols] = display_df[numeric_cols].round(2)
     # Function to highlight outliers (values 2 std devs from median)
     def highlight_outliers(val, median, std, column_name):
         """
