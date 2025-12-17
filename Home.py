@@ -1625,6 +1625,7 @@ try:
     display_df = display_df.dropna(how='all')
     numeric_cols = display_df.select_dtypes(include=[np.number]).columns
     display_df[numeric_cols] = display_df[numeric_cols].round(2)
+    
     # Function to highlight outliers (values 2 std devs from median)
     def highlight_outliers(val, median, std, column_name):
         """
@@ -1695,7 +1696,8 @@ try:
             styled_df,
             hide_index=True,
             use_container_width=True,
-            height=600
+            height=600,
+            column_config= {"Sleep (avg # of hours)": st.column_config.NumberColumn(format="%.1f")},
         )
         
         # Show statistics summary
