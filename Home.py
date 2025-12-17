@@ -1608,7 +1608,7 @@ if __name__ == "__main__":
 
 st.header("Table Assessments - Team View")
 st.markdown('<p class="sub-header">kats Baseball Assessment Table by Player</p>', unsafe_allow_html=True)
-excel_file_path = os.path.join("data", "katsBaseballTableAssessment.xlsx")
+excel_file_path = os.path.join("data", "KatsBaseballTableAssessment.xlsx")
 
 try:
     # Read the Excel file
