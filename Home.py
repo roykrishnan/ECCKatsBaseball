@@ -155,6 +155,73 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def get_handedness_from_raw_data():
+    """
+    Dynamically determine pitcher handedness from fastball horizontal break.
+    Negative horizontal break = LHP (ball breaks arm-side for lefty)
+    Positive horizontal break = RHP (ball breaks arm-side for righty)
+    """
+    data_dir = "data"
+    handedness_map = {}
+    
+    if not os.path.exists(data_dir):
+        return handedness_map
+    
+    csv_files = glob.glob(os.path.join(data_dir, "*.csv"))
+    
+    for csv_file in csv_files:
+        try:
+            encodings_to_try = ['utf-8', 'utf-16', 'latin1', 'cp1252', 'iso-8859-1']
+            lines = None
+            successful_encoding = None
+            
+            for encoding in encodings_to_try:
+                try:
+                    with open(csv_file, 'r', encoding=encoding) as f:
+                        lines = f.readlines()
+                    successful_encoding = encoding
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if lines is None:
+                continue
+            
+            player_name = None
+            data_start_row = None
+            
+            for i, line in enumerate(lines):
+                if 'Player Name:' in line:
+                    player_name = line.split(',')[1].strip()
+                elif line.startswith('No,Date'):
+                    data_start_row = i
+                    break
+            
+            if data_start_row is not None and player_name:
+                pitch_data = pd.read_csv(csv_file, skiprows=data_start_row, encoding=successful_encoding)
+                
+                # Filter for fastballs
+                fastball_data = pitch_data[pitch_data['Pitch Type'].str.contains('Fastball', case=False, na=False)]
+                
+                if len(fastball_data) > 0 and 'HB (trajectory)' in fastball_data.columns:
+                    fastball_data = fastball_data.copy()
+                    fastball_data['HB (trajectory)'] = pd.to_numeric(fastball_data['HB (trajectory)'], errors='coerce')
+                    avg_hb = fastball_data['HB (trajectory)'].mean()
+                    
+                    if pd.notna(avg_hb):
+                        # Negative HB = LHP, Positive HB = RHP
+                        handedness_map[player_name] = 'LHP' if avg_hb < 0 else 'RHP'
+        except Exception:
+            continue
+    
+    return handedness_map
+
+
+@st.cache_data
+def get_cached_handedness_map():
+    """Cache the handedness detection to avoid repeated file reads"""
+    return get_handedness_from_raw_data()
+
 @st.cache_data
 def load_rapsodo_data():
     """Load Rapsodo pitching data from CSV files in data directory"""
@@ -304,9 +371,9 @@ def load_rapsodo_data():
     for pitch_type in pitch_types:
     # Check if this pitch type has data
         velocity_col = f'{pitch_type}_Velocity'
-    if velocity_col in df.columns:
+        if velocity_col in df.columns:
         # Create temporary dataframe for this pitch type
-        pitch_df = df[df[velocity_col].notna()].copy()
+            pitch_df = df[df[velocity_col].notna()].copy()
         if len(pitch_df) > 0:
             # Calculate kats Stuff+ for this pitch type
             stuff_plus_col = f'{pitch_type}_Stuff+'
@@ -548,12 +615,7 @@ def load_individual_pitch_data():
     all_pitch_data = []
     
     csv_files = glob.glob(os.path.join(data_dir, "*.csv"))
-    
-    # Handedness mapping
-    handedness_map = {
-        'Brendon Parker': 'LHP',
-        'Kieran Glassford': 'LHP'
-    }
+    handedness_map = get_handedness_from_raw_data()
     
     for csv_file in csv_files:
         try:
@@ -825,19 +887,11 @@ st.dataframe(
 # Right vs Left Handed Analysis
 st.subheader(f"{display_name} - Right vs Left Handed Pitchers")
 
-# Handedness mapping for St. Bonaventure Baseball team
-handedness_map = {
-    'Andrew Ayers': 'LHP',
-    'Tom Wilkie': 'LHP', 
-    'Conor Wolf': 'LHP',
-    'Jakson Ross': 'LHP',
-    'Mark Holm': 'LHP',
-    'Nolan Feidt': 'LHP',
-    'Ty Corey': 'LHP'
-    # Everyone else defaults to RHP
-}
+# Dynamic handedness detection based on fastball horizontal break
+# Negative horizontal break = LHP, Positive horizontal break = RHP
+handedness_map = get_cached_handedness_map()
 
-# Add handedness to display_df - default to RHP for unlisted players
+# Add handedness to display_df - default to RHP if detection fails
 display_df['Handedness'] = display_df['PlayerName'].map(handedness_map).fillna('RHP')
 
 col1, col2 = st.columns(2)
@@ -851,7 +905,7 @@ with col1:
         # Create RHP leaderboard
         rhp_table = create_leaderboard_table(rhp_df, stuff_plus_col, [])
         st.dataframe(
-            rhp_table.head(10),
+            rhp_table,
             hide_index=True,
             use_container_width=True,
             column_config={
@@ -876,7 +930,7 @@ with col2:
         # Create LHP leaderboard
         lhp_table = create_leaderboard_table(lhp_df, stuff_plus_col, [])
         st.dataframe(
-            lhp_table.head(10),
+            lhp_table,
             hide_index=True,
             use_container_width=True,
             column_config={
@@ -913,7 +967,7 @@ def get_access_token():
 
 @st.cache_data(ttl=1800)
 def load_kats_players_from_csv():
-    """Load St. Bonaventure Baseball players from CSV files"""
+    """Load players from CSV files"""
     data_dir = "data"
     kats_players = {}
     
@@ -921,11 +975,7 @@ def load_kats_players_from_csv():
         return {}
     
     csv_files = glob.glob(os.path.join(data_dir, "*.csv"))
-    
-    handedness_map = {
-        'Andrew Ayers': 'LHP', 'Tom Wilkie': 'LHP', 'Conor Wolf': 'LHP',
-        'Jakson Ross': 'LHP', 'Mark Holm': 'LHP', 'Nolan Feidt': 'LHP', 'Ty Corey': 'LHP'
-    }
+    handedness_map = get_handedness_from_raw_data()
     
     for csv_file in csv_files:
         try:
@@ -1149,6 +1199,380 @@ def fetch_test_trials_batch(team_id, test_ids):
         return pd.DataFrame(all_trials)
     else:
         return pd.DataFrame()
+
+@st.cache_data(ttl=600)
+def fetch_dynamo_tests(profile_ids, modified_from_date):
+    """Fetch Dynamo test data for specific profiles"""
+    if not profile_ids:
+        return pd.DataFrame()
+    
+    token = get_access_token()
+    if not token:
+        return pd.DataFrame()
+    
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    # Date parameters - all three are REQUIRED for Dynamo API
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    test_from = f"{modified_from_date}T00:00:00.000Z"
+    test_to = now.strftime('%Y-%m-%dT23:59:59.000Z')
+    modified_from = f"{modified_from_date}T00:00:00.000Z"
+    
+    tenant_id = VALD_CONFIG['tenant_id']
+    base = VALD_CONFIG['dynamo_base_url']
+    
+    # Dynamo uses different endpoint structure: /v2022q2/teams/{tenantId}/tests
+    url = f"{base}/v2022q2/teams/{tenant_id}/tests"
+    
+    all_tests = []
+    page = 1
+    max_pages = 20
+    
+    try:
+        while page <= max_pages:
+            params = {
+                "modifiedFromUtc": modified_from,
+                "testFromUtc": test_from,
+                "testToUtc": test_to,
+                "includeRepSummaries": "true",
+                "page": page
+            }
+            
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            
+            if response.status_code == 204:
+                break
+            
+            if response.ok:
+                data = response.json()
+                items = data.get("items", [])
+                total_pages = data.get("totalPages", 1)
+                
+                if items:
+                    # Filter for our team's profiles
+                    filtered_tests = [test for test in items if test.get('athleteId') in profile_ids]
+                    all_tests.extend(filtered_tests)
+                
+                if page >= total_pages:
+                    break
+                page += 1
+            else:
+                break
+        
+        if all_tests:
+            df = pd.DataFrame(all_tests)
+            df['test_date'] = pd.to_datetime(df['startTimeUTC']).dt.date
+            return df
+        return pd.DataFrame()
+        
+    except Exception as e:
+        st.error(f"Error fetching Dynamo tests: {str(e)}")
+        return pd.DataFrame()
+
+
+def extract_dynamo_metrics(dynamo_df, all_profiles):
+    """Extract key metrics from Dynamo test data with player names"""
+    if dynamo_df.empty:
+        return pd.DataFrame()
+    
+    # Create athleteId to name mapping
+    athlete_to_name = {}
+    for profile_id, profile_data in all_profiles.items():
+        athlete_to_name[profile_id] = profile_data['fullName']
+    
+    performance_data = []
+    
+    for _, test in dynamo_df.iterrows():
+        athlete_id = test.get('athleteId')
+        player_name = athlete_to_name.get(athlete_id, 'Unknown')
+        
+        # Skip unknown players
+        if player_name == 'Unknown':
+            continue
+        
+        # Construct test type name: bodyRegion + movement + position
+        test_type = f"{test.get('bodyRegion', '')} {test.get('movement', '')} - {test.get('position', '')}"
+        
+        # Get repetition summaries
+        rep_summaries = test.get('repetitionTypeSummaries', [])
+        
+        for rep in rep_summaries:
+            record = {
+                'testId': test.get('id'),
+                'athleteId': athlete_id,
+                'player_name': player_name,
+                'test_date': test.get('test_date'),
+                'testCategory': test.get('testCategory'),
+                'bodyRegion': test.get('bodyRegion'),
+                'movement': test.get('movement'),
+                'position': test.get('position'),
+                'test_type': test_type,
+                'laterality': rep.get('laterality'),
+                'repCount': rep.get('repCount'),
+                'maxForceNewtons': rep.get('maxForceNewtons'),
+                'avgForceNewtons': rep.get('avgForceNewtons'),
+                'maxImpulseNewtonSeconds': rep.get('maxImpulseNewtonSeconds'),
+                'avgImpulseNewtonSeconds': rep.get('avgImpulseNewtonSeconds'),
+                'maxRateOfForceDevelopmentNewtonsPerSecond': rep.get('maxRateOfForceDevelopmentNewtonsPerSecond'),
+                'avgRateOfForceDevelopmentNewtonsPerSecond': rep.get('avgRateOfForceDevelopmentNewtonsPerSecond'),
+                'maxRangeOfMotionDegrees': rep.get('maxRangeOfMotionDegrees'),
+                'avgRangeOfMotionDegrees': rep.get('avgRangeOfMotionDegrees'),
+                'avgTimeToPeakForceSeconds': rep.get('avgTimeToPeakForceSeconds'),
+            }
+            performance_data.append(record)
+    
+    return pd.DataFrame(performance_data) if performance_data else pd.DataFrame()
+
+
+def create_trunk_rotation_leaderboard(dynamo_perf_df):
+    """Create leaderboard for Trunk Rotation tests"""
+    
+    if dynamo_perf_df.empty:
+        st.warning("No Dynamo performance data available")
+        return
+    
+    # Filter for Trunk Rotation tests
+    trunk_data = dynamo_perf_df[
+        (dynamo_perf_df['bodyRegion'] == 'Trunk') & 
+        (dynamo_perf_df['movement'].str.contains('Rotation', case=False, na=False))
+    ].copy()
+    
+    if trunk_data.empty:
+        st.warning("No Trunk Rotation data found")
+        return
+    
+    st.subheader("Trunk Rotation Performance Analysis")
+    
+    # Show test count info
+    total_tests = len(trunk_data)
+    unique_players = trunk_data['player_name'].nunique()
+    st.info(f"Found {total_tests} Trunk Rotation measurements from {unique_players} players")
+    
+    # Metric selection
+    available_metrics = [
+        ('maxForceNewtons', 'Peak Force (N)', 'Newtons'),
+        ('avgForceNewtons', 'Avg Force (N)', 'Newtons'),
+        ('maxImpulseNewtonSeconds', 'Peak Impulse (N·s)', 'Newton-seconds'),
+        ('maxRateOfForceDevelopmentNewtonsPerSecond', 'Peak RFD (N/s)', 'Newtons/second'),
+    ]
+    
+    metric_options = [m[1] for m in available_metrics]
+    selected_metric_display = st.selectbox("Select Metric:", metric_options, key="trunk_metric")
+    
+    # Get the actual column name
+    selected_metric = None
+    selected_units = None
+    for col, display, units in available_metrics:
+        if display == selected_metric_display:
+            selected_metric = col
+            selected_units = units
+            break
+    
+    if selected_metric is None or selected_metric not in trunk_data.columns:
+        st.error(f"Metric {selected_metric_display} not available")
+        return
+    
+    # Create tabs for different views
+    tab1, tab2, tab3 = st.tabs(["Overall Leaderboard", "Left vs Right Comparison", "Asymmetry Analysis"])
+    
+    with tab1:
+        # Get best performance per player (max across all lateralities)
+        player_best = trunk_data.groupby('player_name')[selected_metric].max().reset_index()
+        player_best = player_best.sort_values(selected_metric, ascending=False)
+        player_best = player_best[player_best[selected_metric].notna()]
+        
+        if player_best.empty:
+            st.warning("No valid data for selected metric")
+            return
+        
+        # Statistics
+        group_avg = player_best[selected_metric].mean()
+        group_std = player_best[selected_metric].std()
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Group Average", f"{group_avg:.1f} {selected_units}")
+        with col2:
+            st.metric("Players Tested", len(player_best))
+        with col3:
+            if len(player_best) > 0:
+                st.metric("Top Performer", player_best.iloc[0]['player_name'].split()[0])
+        with col4:
+            if len(player_best) > 0:
+                st.metric("Best Value", f"{player_best.iloc[0][selected_metric]:.1f}")
+        
+        # Create bar chart
+        fig, ax = plt.subplots(figsize=(14, 8))
+        fig.patch.set_facecolor('#1e1e1e')
+        ax.set_facecolor('#1e1e1e')
+        
+        # Color coding based on performance
+        colors = []
+        for _, row in player_best.iterrows():
+            value = row[selected_metric]
+            if value >= group_avg + 0.5 * group_std:
+                colors.append('#2E8B8B')  # Teal for excellent
+            elif value >= group_avg:
+                colors.append('#4A90A4')  # Blue for above average
+            elif value >= group_avg - 0.5 * group_std:
+                colors.append('#FFA500')  # Orange for below average
+            else:
+                colors.append('#FF6B6B')  # Red for needs improvement
+        
+        bars = ax.bar(range(len(player_best)), player_best[selected_metric], color=colors, alpha=0.8)
+        
+        # Add group average line
+        ax.axhline(y=group_avg, color='white', linestyle='--', linewidth=2, alpha=0.8,
+                  label=f'Group Average: {group_avg:.1f}')
+        
+        ax.set_title(f'ECC Kats Baseball - Trunk Rotation\n{selected_metric_display}',
+                    fontsize=16, pad=20, fontweight='bold', color='white')
+        ax.set_ylabel(f'{selected_metric_display}', fontsize=12, color='white')
+        ax.set_xlabel('Players (Ranked by Performance)', fontsize=12, color='white')
+        
+        ax.set_xticks(range(len(player_best)))
+        ax.set_xticklabels([name.split()[0] for name in player_best['player_name']],
+                          rotation=45, ha='right', color='white')
+        
+        # Add value labels
+        for bar, value in zip(bars, player_best[selected_metric]):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + (ax.get_ylim()[1] - ax.get_ylim()[0]) * 0.01,
+                   f'{value:.1f}', ha='center', va='bottom', fontsize=9, fontweight='bold', color='white')
+        
+        ax.tick_params(colors='white')
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.legend(facecolor='#1e1e1e', edgecolor='white', labelcolor='white')
+        
+        for spine in ax.spines.values():
+            spine.set_color('white')
+        
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close()
+        
+        # Rankings table
+        st.subheader("Trunk Rotation Rankings")
+        rankings_df = player_best.copy()
+        rankings_df['Rank'] = range(1, len(rankings_df) + 1)
+        group_median = player_best[selected_metric].median()
+        rankings_df['vs_median'] = ((rankings_df[selected_metric] - group_median) / group_median * 100).round(1)
+        rankings_df = rankings_df[['Rank', 'player_name', selected_metric, 'vs_median']]
+        rankings_df.columns = ['Rank', 'Player', selected_metric_display, 'vs Median (%)']
+        
+        st.dataframe(rankings_df, use_container_width=True, hide_index=True)
+    
+    with tab2:
+        # Left vs Right comparison
+        st.subheader("Left vs Right Rotation Comparison")
+        
+        # Get left and right values per player
+        left_data = trunk_data[trunk_data['laterality'] == 'LeftSide'].groupby('player_name')[selected_metric].max()
+        right_data = trunk_data[trunk_data['laterality'] == 'RightSide'].groupby('player_name')[selected_metric].max()
+        
+        comparison_df = pd.DataFrame({
+            'Left': left_data,
+            'Right': right_data
+        }).dropna()
+        
+        if comparison_df.empty:
+            st.info("Need bilateral data for comparison")
+        else:
+            comparison_df['Asymmetry (%)'] = ((comparison_df['Left'] - comparison_df['Right']).abs() / 
+                                               comparison_df[['Left', 'Right']].max(axis=1) * 100).round(1)
+            comparison_df['Dominant Side'] = comparison_df.apply(
+                lambda x: 'Left' if x['Left'] > x['Right'] else 'Right', axis=1
+            )
+            
+            comparison_df = comparison_df.reset_index()
+            comparison_df.columns = ['Player', 'Left (N)', 'Right (N)', 'Asymmetry (%)', 'Dominant Side']
+            
+            st.dataframe(comparison_df.sort_values('Asymmetry (%)', ascending=False), 
+                        use_container_width=True, hide_index=True)
+            
+            # Visualization
+            fig, ax = plt.subplots(figsize=(12, 6))
+            fig.patch.set_facecolor('#1e1e1e')
+            ax.set_facecolor('#1e1e1e')
+            
+            x = range(len(comparison_df))
+            width = 0.35
+            
+            bars1 = ax.bar([i - width/2 for i in x], comparison_df['Left (N)'], width, 
+                          label='Left', color='#4A90A4', alpha=0.8)
+            bars2 = ax.bar([i + width/2 for i in x], comparison_df['Right (N)'], width,
+                          label='Right', color='#C41E3A', alpha=0.8)
+            
+            ax.set_ylabel(selected_metric_display, color='white')
+            ax.set_title('Left vs Right Trunk Rotation', color='white', fontweight='bold')
+            ax.set_xticks(x)
+            ax.set_xticklabels([name.split()[0] for name in comparison_df['Player']], 
+                             rotation=45, ha='right', color='white')
+            ax.legend(facecolor='#1e1e1e', edgecolor='white', labelcolor='white')
+            ax.tick_params(colors='white')
+            
+            for spine in ax.spines.values():
+                spine.set_color('white')
+            
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close()
+    
+    with tab3:
+        # Asymmetry Analysis
+        st.subheader("Rotational Asymmetry Analysis")
+        
+        if 'comparison_df' not in dir() or comparison_df.empty:
+            # Recalculate if needed
+            left_data = trunk_data[trunk_data['laterality'] == 'LeftSide'].groupby('player_name')[selected_metric].max()
+            right_data = trunk_data[trunk_data['laterality'] == 'RightSide'].groupby('player_name')[selected_metric].max()
+            
+            comparison_df = pd.DataFrame({
+                'Left': left_data,
+                'Right': right_data
+            }).dropna()
+            
+            if not comparison_df.empty:
+                comparison_df['Asymmetry (%)'] = ((comparison_df['Left'] - comparison_df['Right']).abs() / 
+                                                   comparison_df[['Left', 'Right']].max(axis=1) * 100).round(1)
+                comparison_df = comparison_df.reset_index()
+        
+        if comparison_df.empty:
+            st.info("Need bilateral data for asymmetry analysis")
+        else:
+            # Flag players with significant asymmetry (>10%)
+            high_asymmetry = comparison_df[comparison_df['Asymmetry (%)'] > 10]
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                avg_asymmetry = comparison_df['Asymmetry (%)'].mean()
+                st.metric("Team Avg Asymmetry", f"{avg_asymmetry:.1f}%")
+            with col2:
+                st.metric("Players with >10% Asymmetry", len(high_asymmetry))
+            
+            if len(high_asymmetry) > 0:
+                st.warning("**Players with Significant Rotational Asymmetry (>10%):**")
+                for _, row in high_asymmetry.iterrows():
+                    player = row['Player'] if 'Player' in row else row['index']
+                    asym = row['Asymmetry (%)']
+                    st.write(f"- {player}: {asym:.1f}% asymmetry")
+            
+            st.markdown("""
+            ---
+            ### Training Recommendations for Rotational Asymmetry
+            
+            **If Asymmetry > 10%:**
+            - Focus on **unilateral rotational exercises** to the weaker side
+            - Implement **anti-rotation holds** (Pallof press, bird dogs)
+            - Address potential **hip or thoracic mobility restrictions**
+            - Consider **manual therapy** for tissue quality imbalances
+            
+            **For Pitchers:**
+            - Some asymmetry is expected due to throwing demands
+            - Monitor for **increasing asymmetry** over time
+            - Ensure adequate **deceleration strength** on non-throwing side
+            """)
 
 def extract_performance_metrics_from_trials(trials_df, test_data):
     """Extract performance metrics from the results field in trial data"""
@@ -1603,6 +2027,55 @@ def main():
     else:
         st.info("Click 'Load Force Plate Data' to generate leaderboards for the selected date")
 
+    st.markdown("---")
+    st.title("Rotational Power Leaderboards")
+    st.markdown('<p class="sub-header">Trunk Rotation Testing via Isometric Pulls</p>', unsafe_allow_html=True)
+
+    # Date selection for Dynamo data
+    dynamo_date = st.date_input(
+        "Select Dynamo Testing Start Date",
+        value=date(2025, 12, 6),
+        min_value=date(2025, 1, 1),
+        max_value=date.today(),
+        key="dynamo_date_select"
+    )
+
+    if st.button("Load Rotational Power Data", type="primary", key="load_dynamo"):
+        # Use the same profile matching as ForceDecks
+        if 'name_to_profile_id' not in st.session_state or not st.session_state.name_to_profile_id:
+            # Initialize if not done
+            kats_players = load_kats_players_from_csv()
+            all_profiles = fetch_all_profiles()
+            name_to_profile_id = match_players_to_profiles(kats_players, all_profiles)
+            st.session_state.kats_players = kats_players
+            st.session_state.all_profiles = all_profiles
+            st.session_state.name_to_profile_id = name_to_profile_id
+        
+        profile_ids = list(st.session_state.name_to_profile_id.values())
+        
+        with st.spinner("Loading Dynamo rotational data..."):
+            dynamo_df = fetch_dynamo_tests(profile_ids, dynamo_date.strftime('%Y-%m-%d'))
+            
+            if not dynamo_df.empty:
+                # Extract performance metrics
+                dynamo_perf_df = extract_dynamo_metrics(dynamo_df, st.session_state.all_profiles)
+                
+                if not dynamo_perf_df.empty:
+                    st.session_state.dynamo_performance_data = dynamo_perf_df
+                    
+                    # Show summary of what was loaded
+                    trunk_count = len(dynamo_perf_df[dynamo_perf_df['bodyRegion'] == 'Trunk'])
+                    st.success(f"Loaded {len(dynamo_perf_df)} Dynamo measurements ({trunk_count} Trunk Rotation)")
+                else:
+                    st.warning("No performance metrics extracted from Dynamo data")
+            else:
+                st.warning("No Dynamo test data found for selected date range")
+
+    # Display Trunk Rotation leaderboard if data is available
+    if 'dynamo_performance_data' in st.session_state and not st.session_state.dynamo_performance_data.empty:
+        create_trunk_rotation_leaderboard(st.session_state.dynamo_performance_data)
+    else:
+        st.info("Click 'Load Rotational Power Data' to generate leaderboards for the selected date.")
 if __name__ == "__main__":
     main()
 
@@ -1686,10 +2159,10 @@ try:
         st.markdown("""
         <div style='padding: 10px; background-color: #000000; border-radius: 5px; margin-bottom: 10px; color: white;'>
             <strong>Legend:</strong> 
-            <span style='background-color: #cc0000; color: white; padding: 2px 8px; margin: 0 5px; border-radius: 3px; font-weight: bold;'>Mobility Deficiency (< Median - 2 SD)</span>
-            <span style='background-color: #006400; color: white; padding: 2px 8px; margin: 0 5px; border-radius: 3px; font-weight: bold;'>Hyper Mobility (> Median + 2 SD)</span>
+            <span style='background-color: #cc0000; color: white; padding: 2px 8px; margin: 0 5px; border-radius: 3px; font-weight: bold;'>Mobility Deficiency</span>
+            <span style='background-color: #006400; color: white; padding: 2px 8px; margin: 0 5px; border-radius: 3px; font-weight: bold;'>Hyper Mobility (positive outlier, ensure conservation) </span>
         </div>
-        """, unsafe_allow_html=True)
+        """, unsafe_allow_html =True)
         
         # Display the styled table
         st.dataframe(

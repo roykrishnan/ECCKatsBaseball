@@ -1873,6 +1873,644 @@ def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exer
     else:
         st.info("No trial data available for this exercise type")
 
+@st.cache_data(ttl=600)
+def fetch_player_dynamo_tests(profile_id, modified_from_date):
+    """Fetch Dynamo test data for a specific player"""
+    if not profile_id:
+        return pd.DataFrame()
+    
+    token = get_access_token()
+    if not token:
+        return pd.DataFrame()
+    
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    # Date parameters - all three are REQUIRED for Dynamo API
+    from datetime import datetime
+    now = datetime.now()
+    test_from = f"{modified_from_date}T00:00:00.000Z"
+    test_to = now.strftime('%Y-%m-%dT23:59:59.000Z')
+    modified_from = f"{modified_from_date}T00:00:00.000Z"
+    
+    tenant_id = VALD_CONFIG['tenant_id']
+    base = VALD_CONFIG['dynamo_base_url']
+    
+    # Dynamo uses different endpoint structure: /v2022q2/teams/{tenantId}/tests
+    url = f"{base}/v2022q2/teams/{tenant_id}/tests"
+    
+    all_tests = []
+    page = 1
+    max_pages = 20
+    
+    try:
+        while page <= max_pages:
+            params = {
+                "modifiedFromUtc": modified_from,
+                "testFromUtc": test_from,
+                "testToUtc": test_to,
+                "includeRepSummaries": "true",
+                "page": page
+            }
+            
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            
+            if response.status_code == 204:
+                break
+            
+            if response.ok:
+                data = response.json()
+                items = data.get("items", [])
+                total_pages = data.get("totalPages", 1)
+                
+                if items:
+                    # Filter for this specific player
+                    filtered_tests = [test for test in items if test.get('athleteId') == profile_id]
+                    all_tests.extend(filtered_tests)
+                
+                if page >= total_pages:
+                    break
+                page += 1
+            else:
+                break
+        
+        if all_tests:
+            df = pd.DataFrame(all_tests)
+            df['test_date'] = pd.to_datetime(df['startTimeUTC']).dt.date
+            return df
+        return pd.DataFrame()
+        
+    except Exception as e:
+        return pd.DataFrame()
+
+
+def extract_player_dynamo_metrics(dynamo_df):
+    """Extract key metrics from Dynamo test data for a single player"""
+    if dynamo_df.empty:
+        return pd.DataFrame()
+    
+    performance_data = []
+    
+    for _, test in dynamo_df.iterrows():
+        # Construct test type name: bodyRegion + movement + position
+        test_type = f"{test.get('bodyRegion', '')} {test.get('movement', '')} - {test.get('position', '')}"
+        
+        # Get repetition summaries
+        rep_summaries = test.get('repetitionTypeSummaries', [])
+        
+        for rep in rep_summaries:
+            record = {
+                'testId': test.get('id'),
+                'test_date': test.get('test_date'),
+                'testCategory': test.get('testCategory'),
+                'bodyRegion': test.get('bodyRegion'),
+                'movement': test.get('movement'),
+                'position': test.get('position'),
+                'test_type': test_type,
+                'laterality': rep.get('laterality'),
+                'repCount': rep.get('repCount'),
+                'maxForceNewtons': rep.get('maxForceNewtons'),
+                'avgForceNewtons': rep.get('avgForceNewtons'),
+                'maxImpulseNewtonSeconds': rep.get('maxImpulseNewtonSeconds'),
+                'avgImpulseNewtonSeconds': rep.get('avgImpulseNewtonSeconds'),
+                'maxRateOfForceDevelopmentNewtonsPerSecond': rep.get('maxRateOfForceDevelopmentNewtonsPerSecond'),
+                'avgRateOfForceDevelopmentNewtonsPerSecond': rep.get('avgRateOfForceDevelopmentNewtonsPerSecond'),
+                'maxRangeOfMotionDegrees': rep.get('maxRangeOfMotionDegrees'),
+                'avgRangeOfMotionDegrees': rep.get('avgRangeOfMotionDegrees'),
+            }
+            performance_data.append(record)
+    
+    return pd.DataFrame(performance_data) if performance_data else pd.DataFrame()
+
+
+def display_player_rotational_analysis(player_name, profile_id):
+    
+    
+    st.markdown('<h3 class="section-header">Rotational Ability & Arm Care Analysis</h3>', unsafe_allow_html=True)
+    
+    if not profile_id:
+        st.warning(f"No VALD profile found for {player_name} - cannot load Dynamo data")
+        return
+    
+    # Date selection
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        dynamo_date = st.date_input(
+            "Load Dynamo Data From:",
+            value=date(2025, 12, 6),
+            min_value=date(2025, 1, 1),
+            max_value=date.today(),
+            key=f"dynamo_date_{player_name}"
+        )
+        load_dynamo = st.button("Load Rotational & Arm Care Data", type="primary", key=f"load_dynamo_{player_name}")
+    
+    # Load Dynamo data
+    if load_dynamo:
+        with st.spinner("Loading Dynamo data..."):
+            dynamo_df = fetch_player_dynamo_tests(profile_id, dynamo_date.strftime('%Y-%m-%d'))
+            
+            if not dynamo_df.empty:
+                dynamo_perf_df = extract_player_dynamo_metrics(dynamo_df)
+                
+                if not dynamo_perf_df.empty:
+                    st.session_state[f'dynamo_data_{player_name}'] = dynamo_perf_df
+                    st.success(f"Loaded {len(dynamo_perf_df)} Dynamo measurements for {player_name}")
+                else:
+                    st.warning("No performance metrics extracted from Dynamo data")
+            else:
+                st.warning(f"No Dynamo test data found for {player_name} from {dynamo_date}")
+    
+    # Display Dynamo data if available
+    if f'dynamo_data_{player_name}' in st.session_state:
+        dynamo_perf_df = st.session_state[f'dynamo_data_{player_name}']
+        display_player_dynamo_analysis(dynamo_perf_df, player_name)
+
+
+def display_player_dynamo_analysis(dynamo_perf_df, player_name, team_dynamo_df=None):
+    """Display comprehensive Dynamo analysis for a player"""
+    
+    if dynamo_perf_df.empty:
+        st.warning("No Dynamo data available")
+        return
+    
+    # Create tabs for different analysis views
+    tab1, tab2, tab3 = st.tabs(["Trunk Rotation", "Arm Care (ER/IR)", "All Tests Summary"])
+    
+    with tab1:
+        display_trunk_rotation_analysis(dynamo_perf_df, player_name)
+    
+    with tab2:
+        display_arm_care_analysis(dynamo_perf_df, player_name, team_dynamo_df)
+    
+    with tab3:
+        display_all_dynamo_tests(dynamo_perf_df, player_name)
+
+
+def display_trunk_rotation_analysis(dynamo_perf_df, player_name):
+    """Display trunk rotation analysis for a player"""
+    
+    # Filter for trunk rotation tests
+    trunk_data = dynamo_perf_df[
+        (dynamo_perf_df['bodyRegion'] == 'Trunk') & 
+        (dynamo_perf_df['movement'].str.contains('Rotation', case=False, na=False))
+    ].copy()
+    
+    if trunk_data.empty:
+        st.info("No Trunk Rotation data found for this player")
+        return
+    
+    st.subheader("Trunk Rotation Performance")
+    
+    # Get left and right values
+    left_data = trunk_data[trunk_data['laterality'] == 'LeftSide']
+    right_data = trunk_data[trunk_data['laterality'] == 'RightSide']
+    
+    # Key metrics
+    metrics_to_show = [
+        ('maxForceNewtons', 'Peak Force', 'N'),
+        ('avgForceNewtons', 'Avg Force', 'N'),
+        ('maxImpulseNewtonSeconds', 'Peak Impulse', 'N·s'),
+        ('maxRateOfForceDevelopmentNewtonsPerSecond', 'Peak RFD', 'N/s'),
+    ]
+    
+    # Summary metrics
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Total Tests", len(trunk_data['testId'].unique()))
+    
+    with col2:
+        if not left_data.empty:
+            left_max = left_data['maxForceNewtons'].max()
+            st.metric("Left Peak Force", f"{left_max:.1f} N")
+        else:
+            st.metric("Left Peak Force", "N/A")
+    
+    with col3:
+        if not right_data.empty:
+            right_max = right_data['maxForceNewtons'].max()
+            st.metric("Right Peak Force", f"{right_max:.1f} N")
+        else:
+            st.metric("Right Peak Force", "N/A")
+    
+    # Asymmetry calculation
+    if not left_data.empty and not right_data.empty:
+        left_max = left_data['maxForceNewtons'].max()
+        right_max = right_data['maxForceNewtons'].max()
+        if left_max > 0 and right_max > 0:
+            asymmetry = abs(left_max - right_max) / max(left_max, right_max) * 100
+            dominant_side = "Left" if left_max > right_max else "Right"
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                # Color code asymmetry
+                if asymmetry > 15:
+                    st.error(f"⚠️ Asymmetry: {asymmetry:.1f}% - Significant imbalance")
+                elif asymmetry > 10:
+                    st.warning(f"Asymmetry: {asymmetry:.1f}% - Moderate imbalance")
+                else:
+                    st.success(f"Asymmetry: {asymmetry:.1f}% - Within normal range")
+            
+            with col2:
+                st.info(f"Dominant Side: {dominant_side}")
+    
+    # Create comparison chart
+    if not left_data.empty or not right_data.empty:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        fig.patch.set_facecolor('#1e1e1e')
+        ax.set_facecolor('#1e1e1e')
+        
+        metric_names = []
+        left_values = []
+        right_values = []
+        
+        for col, name, unit in metrics_to_show:
+            if col in trunk_data.columns:
+                metric_names.append(f"{name}\n({unit})")
+                left_val = left_data[col].max() if not left_data.empty and col in left_data.columns else 0
+                right_val = right_data[col].max() if not right_data.empty and col in right_data.columns else 0
+                left_values.append(left_val if pd.notna(left_val) else 0)
+                right_values.append(right_val if pd.notna(right_val) else 0)
+        
+        if metric_names:
+            x = np.arange(len(metric_names))
+            width = 0.35
+            
+            bars1 = ax.bar(x - width/2, left_values, width, label='Left', color='#4A90A4', alpha=0.8)
+            bars2 = ax.bar(x + width/2, right_values, width, label='Right', color='#C41E3A', alpha=0.8)
+            
+            ax.set_ylabel('Value', color='white', fontsize=12)
+            ax.set_title(f'{player_name} - Trunk Rotation: Left vs Right', color='white', fontsize=14, fontweight='bold')
+            ax.set_xticks(x)
+            ax.set_xticklabels(metric_names, color='white', fontsize=10)
+            ax.tick_params(colors='white')
+            ax.legend(facecolor='#1e1e1e', edgecolor='white', labelcolor='white')
+            ax.grid(True, alpha=0.3, axis='y')
+            
+            for spine in ax.spines.values():
+                spine.set_color('white')
+            
+            # Add value labels
+            for bar in bars1:
+                height = bar.get_height()
+                if height > 0:
+                    ax.text(bar.get_x() + bar.get_width()/2., height,
+                           f'{height:.0f}', ha='center', va='bottom', color='white', fontsize=9)
+            
+            for bar in bars2:
+                height = bar.get_height()
+                if height > 0:
+                    ax.text(bar.get_x() + bar.get_width()/2., height,
+                           f'{height:.0f}', ha='center', va='bottom', color='white', fontsize=9)
+            
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close()
+    
+    # Training recommendations
+    if not left_data.empty and not right_data.empty:
+        left_max = left_data['maxForceNewtons'].max()
+        right_max = right_data['maxForceNewtons'].max()
+        asymmetry = abs(left_max - right_max) / max(left_max, right_max) * 100 if max(left_max, right_max) > 0 else 0
+        
+        st.markdown("---")
+        st.markdown("### Training Recommendations")
+        
+        if asymmetry > 15:
+            weaker_side = "Left" if left_max < right_max else "Right"
+            st.markdown(f"""
+            **Significant Rotational Asymmetry Detected ({asymmetry:.1f}%)**
+            
+            - Focus on **unilateral rotational exercises** to strengthen the {weaker_side} side
+            - Implement **anti-rotation holds** (Pallof press variations)
+            - Address potential **hip or thoracic mobility restrictions** on the weaker side
+            - Consider **manual therapy** assessment for tissue quality imbalances
+            - **Monitor closely** - asymmetry >15% may increase injury risk for pitchers
+            """)
+        elif asymmetry > 10:
+            st.markdown(f"""
+            **Moderate Rotational Asymmetry ({asymmetry:.1f}%)**
+            
+            - Include **bilateral rotational training** with slight emphasis on weaker side
+            - Maintain **mobility work** for thoracic spine and hips
+            - Continue monitoring asymmetry over time
+            """)
+        else:
+            st.markdown(f"""
+            **Good Rotational Balance ({asymmetry:.1f}%)**
+            
+            - Continue **balanced rotational training** program
+            - Focus on **progressive overload** for continued development
+            - Maintain current mobility and stability work
+            """)
+
+
+def display_arm_care_analysis(dynamo_perf_df, player_name, team_dynamo_df=None):
+    """Display arm care analysis (ER/IR ratio) for a player - research-informed approach"""
+    
+    # Filter for shoulder internal and external rotation tests
+    shoulder_data = dynamo_perf_df[dynamo_perf_df['bodyRegion'] == 'Shoulder'].copy()
+    
+    if shoulder_data.empty:
+        st.info("No shoulder data found for this player")
+        return
+    
+    er_data = shoulder_data[shoulder_data['movement'].str.contains('ExternalRotation', case=False, na=False)]
+    ir_data = shoulder_data[shoulder_data['movement'].str.contains('InternalRotation', case=False, na=False)]
+    
+    st.subheader("Arm Care Analysis (Shoulder ER/IR)")
+    
+    if er_data.empty and ir_data.empty:
+        st.info("No External/Internal Rotation data found")
+        
+        # Show what shoulder tests ARE available
+        available_movements = shoulder_data['movement'].unique()
+        if len(available_movements) > 0:
+            st.write("Available shoulder tests:", list(available_movements))
+        return
+    
+    # Summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        er_count = len(er_data['testId'].unique()) if not er_data.empty else 0
+        st.metric("ER Tests", er_count)
+    
+    with col2:
+        ir_count = len(ir_data['testId'].unique()) if not ir_data.empty else 0
+        st.metric("IR Tests", ir_count)
+    
+    with col3:
+        if not er_data.empty:
+            er_max = er_data['maxForceNewtons'].max()
+            st.metric("ER Peak Force", f"{er_max:.1f} N")
+        else:
+            st.metric("ER Peak Force", "N/A")
+    
+    with col4:
+        if not ir_data.empty:
+            ir_max = ir_data['maxForceNewtons'].max()
+            st.metric("IR Peak Force", f"{ir_max:.1f} N")
+        else:
+            st.metric("IR Peak Force", "N/A")
+    
+    # Calculate ER/IR Ratio
+    if not er_data.empty and not ir_data.empty:
+        er_max = er_data['maxForceNewtons'].max()
+        ir_max = ir_data['maxForceNewtons'].max()
+        
+        if ir_max > 0:
+            er_ir_ratio = er_max / ir_max
+            
+            st.markdown("---")
+            st.subheader("ER/IR Ratio Analysis")
+            
+            # Calculate team median if team data is available
+            team_median_ratio = None
+            team_median_er = None
+            team_median_ir = None
+            
+            if team_dynamo_df is not None and not team_dynamo_df.empty:
+                team_shoulder = team_dynamo_df[team_dynamo_df['bodyRegion'] == 'Shoulder'].copy()
+                team_er = team_shoulder[team_shoulder['movement'].str.contains('ExternalRotation', case=False, na=False)]
+                team_ir = team_shoulder[team_shoulder['movement'].str.contains('InternalRotation', case=False, na=False)]
+                
+                if not team_er.empty and not team_ir.empty:
+                    # Get best ER and IR per player
+                    player_er_best = team_er.groupby('athleteId')['maxForceNewtons'].max()
+                    player_ir_best = team_ir.groupby('athleteId')['maxForceNewtons'].max()
+                    
+                    # Calculate ratio for each player who has both
+                    common_players = player_er_best.index.intersection(player_ir_best.index)
+                    if len(common_players) > 0:
+                        player_ratios = player_er_best[common_players] / player_ir_best[common_players]
+                        team_median_ratio = player_ratios.median()
+                        team_median_er = player_er_best.median()
+                        team_median_ir = player_ir_best.median()
+            
+            # Display metrics with team comparison
+            if team_median_ratio is not None:
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    vs_median = ((er_ir_ratio - team_median_ratio) / team_median_ratio) * 100
+                    st.metric("ER/IR Ratio", f"{er_ir_ratio:.2f}", f"{vs_median:+.1f}% vs team median")
+                
+                with col2:
+                    er_vs_median = ((er_max - team_median_er) / team_median_er) * 100
+                    st.metric("ER vs Team Median", f"{er_max:.1f} N", f"{er_vs_median:+.1f}%")
+                
+                with col3:
+                    ir_vs_median = ((ir_max - team_median_ir) / team_median_ir) * 100
+                    st.metric("IR vs Team Median", f"{ir_max:.1f} N", f"{ir_vs_median:+.1f}%")
+            else:
+                st.metric("ER/IR Ratio", f"{er_ir_ratio:.2f}")
+            
+            # Research-informed interpretation
+            st.markdown(f"""
+            **Interpretation (Isometric Testing):**
+            
+            Research on isometric handheld dynamometry in baseball players shows:
+            - Professional pitcher throwing arm average: ~0.75-0.83
+            - Non-throwing arm average: ~0.99
+            - Ratios <0.70 may indicate increased injury risk
+            - Ratios near 1.0 suggest balanced strength
+            """)
+            
+            # Create larger comparison chart (full width)
+            fig = create_er_ir_comparison_chart(er_max, ir_max, er_ir_ratio, player_name, 
+                                                team_median_ratio, team_median_er, team_median_ir)
+            st.pyplot(fig)
+            plt.close()
+    
+    # Left vs Right comparison for ER and IR
+    st.markdown("---")
+    st.subheader("Left vs Right Shoulder Comparison")
+    
+    # Create comparison data
+    comparison_data = []
+    
+    for movement, data, label in [('ExternalRotation', er_data, 'External Rotation'), 
+                                   ('InternalRotation', ir_data, 'Internal Rotation')]:
+        if not data.empty:
+            left = data[data['laterality'] == 'LeftSide']['maxForceNewtons'].max()
+            right = data[data['laterality'] == 'RightSide']['maxForceNewtons'].max()
+            
+            if pd.notna(left) and pd.notna(right) and left > 0 and right > 0:
+                asymmetry = abs(left - right) / max(left, right) * 100
+                comparison_data.append({
+                    'Movement': label,
+                    'Left (N)': round(left, 1),
+                    'Right (N)': round(right, 1),
+                    'Asymmetry (%)': round(asymmetry, 1),
+                    'Dominant': 'Left' if left > right else 'Right'
+                })
+    
+    if comparison_data:
+        comparison_df = pd.DataFrame(comparison_data)
+        st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+        
+        # Flag significant asymmetries
+        for _, row in comparison_df.iterrows():
+            if row['Asymmetry (%)'] > 15:
+                st.error(f"⚠️ {row['Movement']}: {row['Asymmetry (%)']:.1f}% asymmetry - significant imbalance")
+            elif row['Asymmetry (%)'] > 10:
+                st.warning(f"⚠️ {row['Movement']}: {row['Asymmetry (%)']:.1f}% asymmetry - monitor closely")
+
+
+def create_er_ir_comparison_chart(er_value, ir_value, ratio, player_name, 
+                                   team_median_ratio=None, team_median_er=None, team_median_ir=None):
+    """Create a research-informed comparison chart with team median reference"""
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    fig.patch.set_facecolor('#1e1e1e')
+    
+    # Left panel: Bar comparison with team median
+    ax1.set_facecolor('#1e1e1e')
+    
+    x = np.arange(2)
+    width = 0.35
+    
+    # Player bars
+    player_bars = ax1.bar(x - width/2, [er_value, ir_value], width, 
+                          label=player_name, color=['#4A90A4', '#C41E3A'], 
+                          alpha=0.9, edgecolor='white', linewidth=2)
+    
+    # Team median bars (if available)
+    if team_median_er is not None and team_median_ir is not None:
+        median_bars = ax1.bar(x + width/2, [team_median_er, team_median_ir], width,
+                              label='Team Median', color=['#4A90A4', '#C41E3A'], 
+                              alpha=0.4, edgecolor='white', linewidth=2, hatch='//')
+    
+    # Add value labels on player bars
+    for bar, val in zip(player_bars, [er_value, ir_value]):
+        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 2,
+                f'{val:.1f} N', ha='center', va='bottom', 
+                color='white', fontsize=12, fontweight='bold')
+    
+    # Add value labels on team median bars
+    if team_median_er is not None and team_median_ir is not None:
+        for bar, val in zip(median_bars, [team_median_er, team_median_ir]):
+            ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 2,
+                    f'{val:.1f}', ha='center', va='bottom', 
+                    color='gray', fontsize=10)
+    
+    ax1.set_ylabel('Peak Force (Newtons)', color='white', fontsize=12)
+    ax1.set_title('Rotator Strength vs Team', color='white', fontsize=14, fontweight='bold')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(['External\nRotation', 'Internal\nRotation'], color='white', fontsize=11)
+    ax1.tick_params(colors='white')
+    for spine in ax1.spines.values():
+        spine.set_color('white')
+    ax1.set_ylim(0, max(er_value, ir_value, team_median_er or 0, team_median_ir or 0) * 1.25)
+    
+    # Add legend
+    if team_median_er is not None:
+        legend = ax1.legend(loc='upper right', facecolor='#1e1e1e', edgecolor='white', labelcolor='white')
+    
+    # Right panel: Ratio with research context and team median
+    ax2.set_facecolor('#1e1e1e')
+    
+    # Show ratio as indicator with research reference ranges
+    ax2.barh(['This Player'], [ratio], height=0.3, color='#C41E3A', alpha=0.9, edgecolor='white', linewidth=2)
+    
+    # Add reference lines from research
+    ax2.axvline(x=0.70, color='#FFD700', linestyle='--', linewidth=2, alpha=0.8)
+    ax2.axvline(x=0.83, color='#00CED1', linestyle='--', linewidth=2, alpha=0.8)
+    ax2.axvline(x=1.0, color='white', linestyle=':', linewidth=2, alpha=0.5)
+    
+    # Add team median line if available
+    if team_median_ratio is not None:
+        ax2.axvline(x=team_median_ratio, color='#32CD32', linestyle='-', linewidth=3, alpha=0.9)
+        ax2.text(team_median_ratio, 0.55, f'Team\nMedian\n({team_median_ratio:.2f})', ha='center', va='bottom', 
+                color='#32CD32', fontsize=10, fontweight='bold')
+    
+    # Add reference labels at top
+    ax2.text(0.70, 0.55, 'Injury Risk\nThreshold\n(0.70)', ha='center', va='bottom', 
+            color='#FFD700', fontsize=9, fontweight='bold')
+    ax2.text(0.83, 0.55, 'Pro Pitcher\nAvg\n(0.83)', ha='center', va='bottom', 
+            color='#00CED1', fontsize=9, fontweight='bold')
+    ax2.text(1.0, 0.55, 'Balanced\n(1.0)', ha='center', va='bottom', 
+            color='white', fontsize=9, alpha=0.7)
+    
+    # Add ratio value label
+    label_x = min(ratio + 0.04, 1.25)
+    ax2.text(label_x, 0, f'{ratio:.2f}', ha='left', va='center',
+            color='white', fontsize=18, fontweight='bold')
+    
+    # Add marker for the ratio value
+    ax2.plot(ratio, 0, marker='D', markersize=14, color='white', zorder=10)
+    
+    ax2.set_xlim(0.4, 1.35)
+    ax2.set_ylim(-0.4, 0.9)
+    ax2.set_xlabel('ER/IR Ratio', color='white', fontsize=12)
+    ax2.set_title('Ratio vs Research & Team References', color='white', fontsize=14, fontweight='bold')
+    ax2.tick_params(colors='white', labelleft=False)
+    ax2.set_yticks([])
+    for spine in ax2.spines.values():
+        spine.set_color('white')
+    
+    plt.suptitle(f'{player_name} - Shoulder ER/IR Analysis', 
+                color='white', fontsize=16, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    
+    return fig
+
+
+def display_all_dynamo_tests(dynamo_perf_df, player_name):
+    """Display summary of all Dynamo tests for a player"""
+    
+    st.subheader(f"All Dynamo Tests for {player_name}")
+    
+    # Group by test type
+    test_summary = dynamo_perf_df.groupby(['bodyRegion', 'movement', 'position']).agg({
+        'testId': 'nunique',
+        'maxForceNewtons': 'max',
+        'avgForceNewtons': 'mean',
+        'test_date': ['min', 'max']
+    }).reset_index()
+    
+    # Flatten column names
+    test_summary.columns = ['Body Region', 'Movement', 'Position', 'Test Count', 
+                           'Peak Force (N)', 'Avg Force (N)', 'First Test', 'Last Test']
+    
+    # Round numeric columns
+    test_summary['Peak Force (N)'] = test_summary['Peak Force (N)'].round(1)
+    test_summary['Avg Force (N)'] = test_summary['Avg Force (N)'].round(1)
+    
+    st.dataframe(test_summary, use_container_width=True, hide_index=True)
+    
+    # Show test distribution by body region
+    st.markdown("---")
+    st.subheader("Test Distribution by Body Region")
+    
+    region_counts = dynamo_perf_df.groupby('bodyRegion')['testId'].nunique().reset_index()
+    region_counts.columns = ['Body Region', 'Test Count']
+    
+    fig, ax = plt.subplots(figsize=(8, 4))
+    fig.patch.set_facecolor('#1e1e1e')
+    ax.set_facecolor('#1e1e1e')
+    
+    bars = ax.bar(region_counts['Body Region'], region_counts['Test Count'], 
+                  color='#C41E3A', alpha=0.8, edgecolor='white')
+    
+    ax.set_ylabel('Number of Tests', color='white')
+    ax.set_title(f'{player_name} - Tests by Body Region', color='white', fontweight='bold')
+    ax.tick_params(colors='white')
+    
+    for bar in bars:
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+               f'{int(height)}', ha='center', va='bottom', color='white', fontweight='bold')
+    
+    for spine in ax.spines.values():
+        spine.set_color('white')
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
+
+
 def biomechanics_display(player_name):
     """Display biomechanical chart for the selected player."""
     st.subheader("Kinematics Sequence & Key Metrics Chart Display:")
@@ -1922,6 +2560,7 @@ def biomechanics_display(player_name):
                 caption=f"Biomechanical Analysis for {player_name} - {latest_image['display_date']}")
     else:
         st.warning(f"No biomechanical chart found for {player_name}")
+
 
 def display_player_assessment_data(player_name):
     """Display the specific player's assessment data with outlier highlighting."""
@@ -2002,8 +2641,8 @@ def display_player_assessment_data(player_name):
             st.markdown("""
             <div style='padding: 10px; background-color: #000000; border-radius: 5px; margin-bottom: 10px; color: white;'>
                 <strong>Legend:</strong> 
-                <span style='background-color: #cc0000; color: white; padding: 2px 8px; margin: 0 5px; border-radius: 3px; font-weight: bold;'>Mobility Deficiency (< Median - 2 SD)</span>
-                <span style='background-color: #006400; color: white; padding: 2px 8px; margin: 0 5px; border-radius: 3px; font-weight: bold;'>Hyper Mobility (> Median + 2 SD)</span>
+                <span style='background-color: #cc0000; color: white; padding: 2px 8px; margin: 0 5px; border-radius: 3px; font-weight: bold;'>Mobility Deficiency (Must Improve)</span>
+                <span style='background-color: #006400; color: white; padding: 2px 8px; margin: 0 5px; border-radius: 3px; font-weight: bold;'>Hyper Mobility (Must work to conserve) </span>
             </div>
             """, unsafe_allow_html=True)
             
@@ -2395,6 +3034,14 @@ def main():
         )
 
         display_player_force_plate_section(selected_player)
+
+        if 'vald_profiles' not in st.session_state or not st.session_state.vald_profiles:
+            st.session_state.vald_profiles = fetch_all_vald_profiles()
+        
+        player_profile_id = find_player_vald_profile_id(selected_player, st.session_state.vald_profiles)
+        
+        # Display rotational analysis section
+        display_player_rotational_analysis(selected_player, player_profile_id)
 
         # Add biomechanics section
         st.markdown('<h3 class="section-header">Biomechanical Analysis</h3>', unsafe_allow_html=True)
