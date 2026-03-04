@@ -1680,7 +1680,7 @@ def display_player_rotational_analysis(player_name, profile_id):
     with col1:
         dynamo_date = st.date_input(
             "Load Dynamo Data From:",
-            value=date(2026, 2, 6),
+            value=date(2026, 2, 16),
             min_value=date(2025, 12, 6),
             max_value=date.today(),
             key=f"dynamo_date_{player_name}"
