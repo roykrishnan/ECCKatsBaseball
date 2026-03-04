@@ -1857,8 +1857,8 @@ def main():
         st.write(f"**Matched with VALD:** {len(st.session_state.name_to_profile_id)}")
     
     selected_date = st.date_input(
-        "Select Testing Date (First Test 2025/12/06)",
-        value=date(2025, 12, 6),
+        "Select Testing Date (Last Test 2026/02/15)",
+        value=date(2025, 2, 15),
         min_value=date(2025, 1, 1),
         max_value=date.today()
     )
@@ -1902,8 +1902,8 @@ def main():
     st.caption("Trunk Rotation Testing via Isometric Pulls")
 
     dynamo_date = st.date_input(
-        "Select Dynamo Testing Start Date",
-        value=date(2025, 12, 6),
+        "Select Dynamo Testing Start Date (Last Test: 2/15/26)",
+        value=date(2026, 2, 15),
         min_value=date(2025, 1, 1),
         max_value=date.today(),
         key="dynamo_date_select"
